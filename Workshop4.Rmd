@@ -1,0 +1,215 @@
+---
+title: "marine-genomics - Workshop 4"
+output: html_document
+date: "2026-07-14"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Setup
+
+Create a new github repository called marine-genomics.
+Create a project that is linked to github repository
+Create RMarkdown document
+
+## Assembly
+
+Step 1. Create a working directory called flye and then make a symbolic link to the bbd read data
+
+```bash
+mkdir flye
+ln -s /pvol/data/metagenome_assembly/bbd_0.1.fastq.gz .
+```
+
+Step 2. Make a shell script called run_flye_bbd.sh and include the following
+
+```
+#!/bin/bash
+#SBATCH --time=720
+#SBATCH --ntasks=12 --mem=10gb
+
+echo "Starting flye bbd in $(pwd) at $(date)"
+
+flye --nano-hq ../bbd_0.1.fastq.gz --threads 12 --out-dir bbd --meta
+
+echo "Finished flye bbd in $(pwd) at $(date)"
+```
+
+Step 3. Submit run_flye_bbd.sh using sbatch
+
+```bash
+sbatch run_flye_bbd.sh
+```
+
+## Binning with metabat
+
+Step 1. Create directory called metabat
+
+```bash
+mkdir metabat
+cd metabat
+```
+
+Step 2. Extract depth information
+```bash
+cat ../flye/bbd/assembly_info.txt  | grep -v '#' | awk '{OFS="\t";print $1,$3}' > depths_bbd.txt
+```
+
+Step 3. Reorder contigs based on depth
+```bash
+cat depths_bbd.txt | awk '{print $1}' | xargs samtools faidx ../flye/bbd/assembly.fasta > assembly_bbd_ordered.fasta
+```
+
+Step 4. Run metabat
+```bash
+metabat2 -i assembly_bbd_ordered.fasta -a depths_bbd.txt --cvExt -o bins_bbd/metabat --seed 5
+```
+
+## Check bin quality with checkm
+
+Step 1. Create directory called checkm
+
+```bash
+mkdir checkm
+cd checkm
+```
+
+Step 2. Find the number of the largest contiguous in the bbd assembly (will need to manually add this contig because it usually isn't included in the bins from metabat)
+
+```bash
+cat ../flye/bbd/assembly.fasta | bioawk -c fastx '{print length($seq),$name}' | sort -n
+```
+contig 128 is the largest
+
+Step 3. Create directory called bins_bbd and copy bins_bbd from metabat
+
+```bash
+mkdir bins_bbd
+cp ../metabat/bins_bbd/*.fa bins_bbd/
+samtools faidx ../flye/bbd/assembly.fasta contig_128 > bins_bbd/contig_128.fa
+```
+
+Step 4. Create a slurm script for checkm called run_checkm_bbd.sh in the checkm directory
+
+```
+#!/bin/bash
+#SBATCH --time=60
+#SBATCH --ntasks=6 --mem=40gb
+
+echo "Starting checkm in $(pwd) at $(date)"
+
+shopt -s expand_aliases
+alias checkm='apptainer run -B /pvol/:/pvol /pvol/data/sif/checkm.sif checkm'
+
+checkm lineage_wf bins_bbd out -t 4 -x fa -f checkm_results_bbd.txt
+
+echo "Finished checkm in $(pwd) at $(date)"
+```
+Troubleshooting insight: Had to change memory from 10gb to 40gb due to the server being overloaded
+
+Step 5. Submit run_checkm_bbd.sh using sbatch
+
+```bash
+sbatch run_checkm_bbd.sh
+```
+
+## Select bins based on checkm results
+
+Step 1. Look at results from checkm analysis using head
+```bash
+head checkm_results_bbd.txt 
+```
+
+Step 2. Show a few more lines using head -n 20 
+```bash
+head -n 20 checkm_results_bbd.txt
+```
+
+Step 3. Use checkm completeness greater than 15% using awk to extract the bin IDs
+```bash
+cat checkm_results_bbd.txt | awk '$13>15'
+```
+
+Step 4. Change it from the entire line to just the bin ID using the print command
+```bash
+cat checkm_results_bbd.txt | awk '$13>15{print $1}'
+```
+
+Step 5. Send output to a file so it can be used in other steps
+```bash
+cat checkm_results_bbd.txt | awk '$13>15{print $1}' > bbd_topbins.txt
+```
+
+## Perform taxonomic classification with gtdbtk
+
+Step 1. Create working directory called gtdbtk
+```bash
+mkdir gtdbtk
+cd gtdbtk
+```
+
+Step 2. Create a subfolder within gtdbtk called genomes (this is where a copy of each of the top bins will go)
+```bash
+mkdir genomes
+```
+
+Step 3. Build the command and get the loop working
+```bash
+while read bin;do echo $bin;done < ../checkm/bbd_topbins.txt
+```
+
+Step 4. Use echo $bin to print the name of the bins. Turn the bin name into a path specifying the fasta file for the bin. Every bin will need to prepend the path to its folder ../metabat/bins_bbd/ and then append the file extension .fa
+```bash
+while read bin;do echo "../metabat/bins_bbd/${bin}.fa";done < ../checkm/bbd_topbins.txt
+```
+
+Step 5. Perform the copy from checkm to metabat
+```bash
+while read bin;do cp "../metabat/bins_bbd/${bin}.fa" genomes;done < ../checkm/bbd_topbins.txt
+```
+Troubleshooting insight: Had an error that said contig_128 not found. Had to copy contig_128 from checkm to metabat
+
+Step 6. Check that it worked correctly by listing files within the genomes directory (should see one file for each of the bins)
+```bash
+ls genomes
+```
+
+Step 7. Create slurm script in the gtdbtk directory called run_gtdbtk.sh
+```
+#!/bin/bash
+#SBATCH --time=60
+#SBATCH --ntasks=2 --mem=40gb
+
+echo "Starting gtdbtk in $(pwd) at $(date)"
+
+shopt -s expand_aliases
+alias gtdbtk='apptainer run -B /pvol:/pvol,/pvol/data/mg/gtdbtkdata/release207_v2/:/refdata /pvol/data/sif/gtdbtk.sif'
+
+gtdbtk classify_wf -x fa --cpus 2 --genome_dir genomes --out_dir out --skip_ani_screen
+
+echo "Finished gtdbtk in $(pwd) at $(date)"
+```
+Troubleshooting insight: Had to change memory from 24gb to 40gb due to the server being overloaded
+
+Step 8. Submit run_gtdbtk.sh using sbatch
+```bash
+sbatch run_gtdbtk.sh
+```
+Step 9. Install tidyverse package
+```bash
+library(tidyverse)
+```
+
+Step 10. Check gtdbtk.bac120.summary.tsv to see the classifications
+```{r}
+gtdbtk_result <- read_tsv("gtdbtk.bac120.summary.tsv")
+```
+
+## Find and annotate genes with prokka
+
+Step 1. 
+
+
