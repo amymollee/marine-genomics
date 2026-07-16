@@ -161,7 +161,8 @@ Step 3. Build the command and get the loop working
 while read bin;do echo $bin;done < ../checkm/bbd_topbins.txt
 ```
 
-Step 4. Use echo $bin to print the name of the bins. Turn the bin name into a path specifying the fasta file for the bin. Every bin will need to prepend the path to its folder ../metabat/bins_bbd/ and then append the file extension .fa
+Step 4. Use echo to print the name of the bins. Turn the bin name into a path specifying the fasta file for the bin. 
+Every bin will need to prepend the path to its folder ../metabat/bins_bbd/ and then append the file extension .fa
 ```bash
 while read bin;do echo "../metabat/bins_bbd/${bin}.fa";done < ../checkm/bbd_topbins.txt
 ```
@@ -198,18 +199,181 @@ Step 8. Submit run_gtdbtk.sh using sbatch
 ```bash
 sbatch run_gtdbtk.sh
 ```
-Step 9. Install tidyverse package
-```bash
-library(tidyverse)
-```
-
-Step 10. Check gtdbtk.bac120.summary.tsv to see the classifications
-```{r}
-gtdbtk_result <- read_tsv("gtdbtk.bac120.summary.tsv")
-```
 
 ## Find and annotate genes with prokka
 
-Step 1. 
+Step 1. Create directory called prokka
+```bash
+mkdir prokka
+cd prokka
+```
+
+Step 2. Find the first bin ID 
+```bash
+head -n 1 ../checkm/bbd_topbins.txt
+```
+First bin ID is contig_128
+
+Step 3. Run prokka on a single bin (bin = contig_128) and create folder called contig_128
+```bash
+bin=contig_128
+prokka--outdir $bin --prefix $bin  ../metabat/bins_bbd/${bin}.fa
+```
+
+Step 4. check the contents of folder called contig_128
+```bash
+ls contig_128
+```
+Contents:
+contig_128.err  contig_128.ffn  contig_128.fsa  contig_128.gff  contig_128.sqn  contig_128.tsv
+contig_128.faa  contig_128.fna  contig_128.gbk  contig_128.log  contig_128.tbl  contig_128.txt
+
+Step 5. Run prokka on all the metagenomes using a slurm script called run_prokka.sh
+```
+#!/bin/bash
+#SBATCH --time=60
+#SBATCH --ntasks=2 --mem=2gb
+
+echo "Starting prokka in $(pwd) at $(date)"
+
+shopt -s expand_aliases
+alias prokka='apptainer run -B /pvol/:/pvol /pvol/data/sif/prokka.sif prokka'
+
+while read bin;do 
+  prokka --outdir $bin --prefix $bin "../metabat/bins_bbd/${bin}.fa";
+done < ../checkm/bbd_topbins.txt
+
+echo "Finished prokka in $(pwd) at $(date)"
+```
+
+Step 6. Submit run_prokka.sh using sbatch
+```bash
+sbatch run_prokka.sh
+```
+
+## Infer metabolic pathways
+
+Step 1. Create a directoy for minpath results
+```bash
+mkdir minpath
+cd minpath
+```
+
+Step 2. Look for the .tsv file for a single bin
+```bash
+head ../prokka/metabat.5/metabat.5.tsv
+```
+
+Step 3. Change minpath to keep a unique ID for each gene (column 1) and its EC number (column 5) using awk
+```bash
+head ../prokka/metabat.5/metabat.5.tsv | awk -F '\t' '{print $1,$5}'
+```
+
+Step 4. Filter the output to only include lines with an EC number
+```bash
+head ../prokka/metabat.5/metabat.5.tsv | awk -F '\t' '$5{print $1,$5}'
+```
+
+Step 5. Ensure the output is tab separated and remove the header line
+```bash
+head ../prokka/metabat.5/metabat.5.tsv | awk -F '\t' '$5{OFS="\t";print $1,$5}' | grep -v '^locus'
+```
+
+Step 6. Change head to cat to chnage from the first 10 lines to all of the genes
+```bash
+cat ../prokka/metabat.5/metabat.5.tsv | awk -F '\t' '$5{OFS="\t";print $1,$5}' | grep -v '^locus'
+```
+
+Step 7. Send the output to a file so that it can be used as input to minpath
+```bash
+cat ../prokka/metabat.5/metabat.5.tsv | awk -F '\t' '$5{OFS="\t";print $1,$5}' | grep -v '^locus' > metabat.5.ec
+```
+
+Step 8. Run minpath on the file
+```bash
+minpath -ec metabat.5.ec -report metabat.5.ec.report -details metabat.5.ec.details
+```
+
+Step 9. Look at the top few lines of output
+```bash
+head metabat.5.ec.report 
+```
+
+path PWY-5143 any n/a  naive 1  minpath 1  fam0  1  fam-found  1  name  long-chain fatty acid activation
+path PWY-5083 any n/a  naive 1  minpath 1  fam0  3  fam-found  1  name  NAD(P)/NADPH interconversion
+path PWY-8138 any n/a  naive 1  minpath 1  fam0  1  fam-found  1  name  polyphosphate metabolism
+path PWY-6559 any n/a  naive 1  minpath 1  fam0  2  fam-found  1  name  spermidine biosynthesis II
+path PWY-6562 any n/a  naive 1  minpath 1  fam0  4  fam-found  2  name  norspermidine biosynthesis
+path PWY-6565 any n/a  naive 1  minpath 1  fam0  5  fam-found  2  name  superpathway of polyamine biosynthesis III
+path PWY-8072 any n/a  naive 1  minpath 1  fam0  1  fam-found  1  name  alanine racemization
+path COMPLETE-ARO-PWY any n/a  naive 1  minpath 0  fam0  18  fam-found  1  name  superpathway of aromatic amino acid biosynthesis
+path P4-PWY any n/a  naive 1  minpath 1  fam0  17  fam-found  1  name  superpathway of L-lysine, L-threonine and L-methionine biosynthesis I
+path PWY-724 any n/a  naive 1  minpath 0  fam0  7  fam-found  1  name  superpathway of L-lysine, L-threonine and L-methionine biosynthesis II
+
+Step 10. Prepare minpath inputs for bin
+```bash
+while read bin;do 
+  cat ../prokka/$bin/${bin}.tsv | awk -F '\t' '$5{printf("%s\t%s\n", $1,$5)}' | grep -v '^locus' > ${bin}.ec 
+done < ../checkm/bbd_topbins.txt
+```
+
+Step 11. Run minpath on every bin
+```bash
+while read bin;do 
+  minpath -ec ${bin}.ec -report ${bin}.ec.report -details ${bin}.ec.details
+done < ../checkm/bbd_topbins.txt
+```
+
+Step 12. Search for this pathway across all the bins
+```bash
+grep 'PWY-101' *.ec.report
+```
+
+contig_128.ec.report:path PWY-101 any n/a  naive 1  minpath 0  fam0  4  fam-found  1  name  photosynthesis light reactions
+metabat.33.ec.report:path PWY-101 any n/a  naive 1  minpath 0  fam0  4  fam-found  1  name  photosynthesis light reactions
+metabat.37.ec.report:path PWY-101 any n/a  naive 1  minpath 1  fam0  4  fam-found  4  name  photosynthesis light reactions
+metabat.46.ec.report:path PWY-101 any n/a  naive 1  minpath 1  fam0  4  fam-found  1  name  photosynthesis light reactions
+
+There are four bins that contain at least one gene from the pathway PWY-101
+Bin metabat.37 has all the genes and is a complete pathway
+
+Step 13. Cross reference the results with the output from gtdbth to see the taxonomy of of bins containing the pathway (will need to change to use the correct bin numbers)
+```bash
+grep 'metabat.37' ../gtdbtk/out2/gtdbtk.bac120.summary.tsv
+```
+metabat.37      d__Bacteria;p__Cyanobacteria;c__Cyanobacteriia;o__Cyanobacteriales;f__Desertifilaceae;g__Roseofilum;s__Roseofilum reptotaenium_A    GCA_001890975.1 95.0    d__Bacteria;p__Cyanobacteria;c__Cyanobacteriia;o__Cyanobacteriales;f__Desertifilaceae;g__Roseofilum;s__Roseofilum reptotaenium_A    96.64   0.863   GCA_001890975.1 95.0    d__Bacteria;p__Cyanobacteria;c__Cyanobacteriia;o__Cyanobacteriales;f__Desertifilaceae;g__Roseofilum;s__Roseofilum reptotaenium_A    96.64   0.863   d__Bacteria;p__Cyanobacteria;c__Cyanobacteriia;o__Cyanobacteriales;f__Desertifilaceae;g__Roseofilum;s__     taxonomic classification defined by topology and ANI    topological placement and ANI have congruent species assignments    GCA_002340255.1, s__Roseofilum sp002340255, 95.0, 94.19, 0.87   89.99   11      N/A     N/A
+
+```bash
+grep 'metabat.33' ../gtdbtk/out2/gtdbtk.bac120.summary.tsv
+```
+metabat.33      d__Bacteria;p__Desulfobacterota;c__Desulfobacteria;o__Desulfobacterales;f__Desulforegulaceae;g__;s__    N/A     N/A     N/AN/A      N/A     N/A     N/A     N/A     N/A     N/A     d__Bacteria;p__Desulfobacterota;c__Desulfobacteria;o__Desulfobacterales;f__Desulforegulaceae;g__;s__        taxonomic novelty determined using RED  classification based on placement in class-level tree   N/A     16.08   11 0.8249   N/A
+
+```bash
+grep 'metabat.46' ../gtdbtk/out2/gtdbtk.bac120.summary.tsv
+```
+metabat.46      d__Bacteria;p__Firmicutes_A;c__Clostridia;o__Lachnospirales;f__Vallitaleaceae;g__;s__   N/A     N/A     N/A     N/A     N/AN/A      N/A     N/A     N/A     N/A     d__Bacteria;p__Firmicutes_A;c__Clostridia;o__Lachnospirales;f__Vallitaleaceae;g__;s__   taxonomic novelty determined using RED      classification based on placement in class-level tree   N/A     16.06   11      0.84647 N/A
+
+```bash
+grep 'contig_128' ../gtdbtk/out2/gtdbtk.bac120.summary.tsv
+```
+contig_128      d__Bacteria;p__Bacteroidota;c__Bacteroidia;o__Cytophagales;f__Bernardetiaceae;g__UBA2561;s__UBA2561 sp002340355 GCA_002340355.1     95.0    d__Bacteria;p__Bacteroidota;c__Bacteroidia;o__Cytophagales;f__Bernardetiaceae;g__UBA2561;s__UBA2561 sp002340355 98.71   0.966       GCA_002340355.1 95.0    d__Bacteria;p__Bacteroidota;c__Bacteroidia;o__Cytophagales;f__Bernardetiaceae;g__UBA2561;s__UBA2561 sp002340355     98.71   0.966   d__Bacteria;p__Bacteroidota;c__Bacteroidia;o__Cytophagales;f__Bernardetiaceae;g__;s__   taxonomic classification defined by topology and ANI        topological placement and ANI have congruent species assignments        N/A     90.91   11      N/A     N/A
+
+Troubleshooting insight: Contig_128 not found in genomes so had to copy it from checkm and rerun gtdbtk slurm with contig_128 included (out2)
+
+Step 14. Find out how many bins contain PWY-5360
+```
+grep 'PWY-5360' *.ec.report
+```
+metabat.42.ec.report:path PWY-5360 any n/a  naive 1  minpath 0  fam0  3  fam-found  1  name  superpathway of tetrathionate reduction (Salmonella typhimurium)
+
+There is only one bin that contains the PWY-5360 and it is metabat.42
+
+Step 15. Cross reference the results with the output from gtdbth to see the taxonomy of of bins containing the pathway (will need to change to use the correct bin numbers)
+```bash
+grep 'metabat.42' ../gtdbtk/out2/gtdbtk.bac120.summary.tsv
+```
+metabat.42      d__Bacteria;p__Campylobacterota;c__Campylobacteria;o__Campylobacterales;f__Arcobacteraceae;g__Halarcobacter;s__ N/A     N/AN/A      N/A     N/A     N/A     N/A     N/A     N/A     N/A     d__Bacteria;p__Campylobacterota;c__Campylobacteria;o__Campylobacterales;f__Arcobacteraceae;g__Halarcobacter;s__     ANI     classification based on placement in class-level tree   GCA_004116455.1, s__Halarcobacter sp004116455, 95.0, 81.38, 0.381; GCA_004118855.1, s__Halarcobacter sp004118855, 95.0, 80.71, 0.384; GCF_003346815.1, s__Halarcobacter bivalviorum, 95.0, 80.71, 0.406; GCA_001895145.1, s__Halarcobacter sp001895145, 95.0, 80.51, 0.403; GCF_005771535.1, s__Halarcobacter arenosus, 95.0, 80.5, 0.431; GCA_002869565.1, s__Halarcobacter sp002869565, 95.0, 80.37, 0.393; GCA_013373175.1, s__Halarcobacter sp013373175, 95.0, 80.3, 0.412; GCA_003252105.1, s__Halarcobacter sp003252105, 95.0, 79.87, 0.381; GCF_004116625.1, s__Halarcobacter mediterraneus, 95.0, 79.72, 0.374; GCF_013201825.1, s__Halarcobacter ebronensis, 95.0, 78.98, 0.343; GCF_006459125.1, s__Halarcobacter anaerophilus, 95.0, 78.79, 0.33 30.14       11      0.93462 N/A
+
+The taxonomic family for metabat.42 is Arcobacteraceae
 
 
